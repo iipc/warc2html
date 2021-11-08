@@ -1,8 +1,8 @@
 warc2html <img src="warc2html.png" align="right">
 =========
 
-Converts WARC files to static html while rewriting links to relative URLs suitable for browsing offline or re-hosting
-using a standard web server. 
+Converts WARC files to static html while rewriting links to relative paths suitable for browsing offline or rehosting
+on a standard web server. 
 
 Limitations:
 * Links in JavaScript are not rewritten
@@ -12,14 +12,14 @@ Limitations:
 Usage
 -----
 
-To convert a file named example.warc.gz to static HTML:
+To convert a file named input.warc.gz to static HTML:
 
-    java -jar warc2html.jar -o output/ example.warc.gz
+    java -jar warc2html.jar -o output/ input.warc.gz
 
 Alternatively if you'd like to convert a subset of records you can supply a list of records in CDX11 format and the
-path or URL where your WARC files are stored:
+path or URL where the corresponding WARC files are stored:
 
-    java -jar warc2html.jar -o output/ -b http://server/warcs/ example.cdx
+    java -jar warc2html.jar -o output/ -b http://server/warcs/ input.cdx
 
 Compiling
 ---------
