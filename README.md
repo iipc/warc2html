@@ -1,7 +1,6 @@
-warc2html
+warc2html <img src="warc2html.png" align="right">
 =========
 
-<img src="warc2html.png" align="right">
 Converts WARC files to static html while rewriting links to relative URLs suitable for browsing offline or re-hosting
 using a standard web server. 
 
