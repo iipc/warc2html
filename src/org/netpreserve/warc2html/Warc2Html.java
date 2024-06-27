@@ -8,10 +8,12 @@ package org.netpreserve.warc2html;
 import org.netpreserve.jwarc.WarcReader;
 import org.netpreserve.jwarc.WarcRecord;
 import org.netpreserve.jwarc.WarcResponse;
+import org.netpreserve.jwarc.ParsingException;
 import org.netpreserve.urlcanon.Canonicalizer;
 import org.netpreserve.urlcanon.ParsedUrl;
 
 import java.io.*;
+import java.lang.IllegalArgumentException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
@@ -19,6 +21,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.FileSystemException;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -216,7 +219,13 @@ public class Warc2Html {
         try (var filelist = Files.newBufferedWriter(outDir.resolve("filelist.txt"))) {
             for (Resource resource : resourcesByPath.values()) {
                 try (WarcReader reader = openWarc(resource.warc, resource.offset, resource.length)) {
-                    WarcRecord record = reader.next().orElseThrow();
+                    WarcRecord record;
+                    try {
+                        record = reader.next().orElseThrow();
+                    } catch (ParsingException e) {
+                        System.out.println("Failed to parse record, skipping record and contining to next record.");
+                        continue;
+                    }
                     if (!(record instanceof WarcResponse)) throw new IllegalStateException();
                     WarcResponse response = (WarcResponse) record;
 
@@ -224,24 +233,30 @@ public class Warc2Html {
                     Files.createDirectories(path.getParent());
 
                     long linksRewritten = 0;
-                    try (OutputStream output = Files.newOutputStream(path)) {
-                        InputStream input = response.http().body().stream();
-                        if (resource.isRedirect()) {
-                            String destination = rewriteLink(resource.locationHeader, URI.create(resource.url), resource.path);
-                            if (destination == null) destination = resource.locationHeader;
-                            output.write(("<meta http-equiv=\"refresh\" content=\"0; url=" + destination + "\">\n").getBytes(UTF_8));
-                        } else if (resource.type.equals("text/html")) {
-                            URI baseUri = URI.create(resource.url);
-                            linksRewritten = LinkRewriter.rewriteHTML(input, output, url -> rewriteLink(url, baseUri, resource.path));
-                        } else {
-                            input.transferTo(output);
+                    try {
+                        try (OutputStream output = Files.newOutputStream(path)) {
+                            InputStream input = response.http().body().stream();
+                            if (resource.isRedirect()) {
+                                String destination = rewriteLink(resource.locationHeader, URI.create(resource.url), resource.path);
+                                if (destination == null) destination = resource.locationHeader;
+                                output.write(("<meta http-equiv=\"refresh\" content=\"0; url=" + destination + "\">\n").getBytes(UTF_8));
+                            } else if (resource.type.equals("text/html")) {
+                                URI baseUri = URI.create(resource.url);
+                                linksRewritten = LinkRewriter.rewriteHTML(input, output, url -> rewriteLink(url, baseUri, resource.path));
+                            } else {
+                                input.transferTo(output);
+                            }
                         }
-                    }
 
-                    System.out.println(resource.path + " " + resource.url + " " + resource.type + " " + linksRewritten);
-                    filelist.write(resource.path + " " + ARC_DATE_FORMAT.format(resource.instant) + " " + resource.url +
-                            " " + resource.type + " " + resource.status + " " +
-                            (resource.locationHeader == null ? "-" : resource.locationHeader) + "\r\n");
+                        System.out.println(resource.path + " " + resource.url + " " + resource.type + " " + linksRewritten);
+                        filelist.write(resource.path + " " + ARC_DATE_FORMAT.format(resource.instant) + " " + resource.url +
+                                " " + resource.type + " " + resource.status + " " +
+                                (resource.locationHeader == null ? "-" : resource.locationHeader) + "\r\n");
+                    } catch (FileSystemException e) {
+                        System.out.println("ERROR: File name too long, will not extract:" + resource.path + " " + resource.url + " " + resource.type);
+                    } catch (IllegalArgumentException e) {
+                        System.out.println("ERROR: Illegal character in path, will not extract:" + resource.path + " " + resource.url + " " + resource.type);
+                    }
                 }
             }
         }
