@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.FileSystemException;
+import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -300,6 +301,11 @@ public class Warc2Html {
                             } else {
                                 input.transferTo(output);
                             }
+                        }
+
+                        try {
+                            Files.setLastModifiedTime(path, FileTime.from(resource.instant));
+                        } catch (IOException ignore) {
                         }
 
                         System.out.println(resource.path + " " + resource.url + " " + resource.type + " " + linksRewritten);
