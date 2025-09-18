@@ -1,14 +1,14 @@
 /*
- * Copyright 2021 National Library of Australia
+ * Copyright 2021-2025 National Library of Australia
  * SPDX-License-Identifier: Apache-2.0
  */
 
 package org.netpreserve.warc2html;
 
-import org.netpreserve.jwarc.WarcReader;
-import org.netpreserve.jwarc.WarcRecord;
-import org.netpreserve.jwarc.WarcResponse;
-import org.netpreserve.jwarc.ParsingException;
+import org.netpreserve.jwarc.*;
+import org.netpreserve.jwarc.cdx.CdxFields;
+import org.netpreserve.jwarc.cdx.CdxReader;
+import org.netpreserve.jwarc.cdx.CdxRecord;
 import org.netpreserve.urlcanon.Canonicalizer;
 import org.netpreserve.urlcanon.ParsedUrl;
 
@@ -17,6 +17,7 @@ import java.lang.IllegalArgumentException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,16 +31,19 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.ZoneOffset.UTC;
 
 public class Warc2Html {
-    private static final DateTimeFormatter ARC_DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss", Locale.US).withZone(UTC);
+    static final DateTimeFormatter ARC_DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss", Locale.US).withZone(UTC);
     private static final Map<String, String> DEFAULT_FORCED_EXTENSIONS = loadForcedExtensions();
     private final Map<String, Resource> resourcesByUrlKey = new HashMap<>();
     private final Map<String, Resource> resourcesByPath = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     private final Map<String, String> forcedExtensions = new HashMap<>(DEFAULT_FORCED_EXTENSIONS);
     private String warcBaseLocation = "";
+    private Instant endDate;
+    private Instant startDate;
 
     public static void main(String[] args) throws IOException {
         Warc2Html warc2Html = new Warc2Html();
         Path outputDir = Paths.get(".");
+        boolean dryRun = false;
 
         for (int i = 0; i < args.length; i++) {
             if (args[i].startsWith("-")) {
@@ -48,10 +52,32 @@ public class Warc2Html {
                     case "--help":
                         System.out.println("Usage: warc2html [-o outdir] file1.warc [file2.warc ...]");
                         System.out.println("       warc2html [-o outdir] -b http://example.org/warcs/ file1.cdx [file2.cdx ...]");
+                        System.out.println("       warc2html [-o outdir] --cdx-server CDX-SERVER-URL QUERY-URL");
+                        System.out.println("Options:");
+                        System.out.println("  -o, --output-dir DIR     Output directory for converted files");
+                        System.out.println("  -b, --warc-base URL      Base URL or path where WARC files are stored");
+                        System.out.println("  --after DATE             Only include records after this date (ISO format)");
+                        System.out.println("  --before DATE            Only include records before this date (ISO format)");
+                        System.out.println("  -n, --dry-run            Print the file list without writing files");
                         return;
+                    case "--after":
+                        warc2Html.startDate = Instant.parse(args[++i]);
+                        break;
+                    case "--before":
+                        warc2Html.endDate = Instant.parse(args[++i]);
+                        break;
                     case "-b":
                     case "--warc-base":
                         warc2Html.setWarcBaseLocation(args[++i]);
+                        break;
+                    case "--cdx-server":
+                        String cdxServerUrl = args[++i];
+                        String queryUrl = args[++i];
+                        warc2Html.loadCdxServer(cdxServerUrl, queryUrl);
+                        break;
+                    case "--dry-run":
+                    case "-n":
+                        dryRun = true;
                         break;
                     case "-o":
                     case "--output-dir":
@@ -70,7 +96,11 @@ public class Warc2Html {
         }
 
         warc2Html.resolveRedirects();
-        warc2Html.writeTo(outputDir);
+        if (dryRun) {
+            warc2Html.dump();
+        } else {
+            warc2Html.writeTo(outputDir);
+        }
     }
 
     public static String makeUrlKey(String url) {
@@ -111,25 +141,41 @@ public class Warc2Html {
         if (firstByte == 'W' || firstByte == 0x1f || firstByte == 'f') {
             loadWarc(filename, stream);
         } else {
-            loadCdx(new BufferedReader(new InputStreamReader(stream, UTF_8)));
+            loadCdx(stream);
         }
     }
 
-    public void loadCdx(BufferedReader reader) throws IOException {
-        for (String line = reader.readLine(); line != null; line = reader.readLine()) {
-            if (line.isBlank() || line.startsWith(" ")) continue;
+    public void loadCdxServer(String cdxServerUrl, String queryUrl) throws IOException {
+        String surtPrefix = URIs.toNormalizedSurt(queryUrl);
+        CdxRecord previous = null;
+        out: while (true) {
+            String query = "?matchType=range&url=" + URLEncoder.encode(queryUrl, UTF_8);
+            try (var reader = new CdxReader(URI.create(cdxServerUrl + query).toURL().openStream())) {
+                for (var record : reader) {
+                    String surt = record.get(CdxFields.NORMALIZED_SURT);
+                    if (!surt.startsWith(surtPrefix)) break out;
+                    queryUrl = record.target();
+                    if (!shouldInclude(new Resource(record))) continue;
+                    if (previous != null && !previous.get(CdxFields.NORMALIZED_SURT).equals(surt)) {
+                        add(new Resource(previous));
+                    }
+                    previous = record;
+                }
+            }
+        }
+        if (previous != null) add(new Resource(previous));
+    }
 
-            String[] fields = line.split(" ");
-            Instant instant = ARC_DATE_FORMAT.parse(fields[1], Instant::from);
-            String url = fields[2];
-            String type = fields[3];
-            int status = fields[4].equals("-") ? 0 : Integer.parseInt(fields[4]);
-            long length = Long.parseLong(fields[8]);
-            long offset = Long.parseLong(fields[9]);
-            String warc = fields[11];
-            String locationHeader = fields[6];
+    private boolean shouldInclude(Resource resource) {
+        if (resource.status >= 400) return false;
+        if (endDate != null && resource.instant.isAfter(endDate)) return false;
+        if (startDate != null && resource.instant.isBefore(startDate)) return false;
+        return true;
+    }
 
-            add(new Resource(url, instant, status, type, warc, offset, length, locationHeader));
+    public void loadCdx(InputStream stream) throws IOException {
+        for (CdxRecord record : new CdxReader(stream)) {
+            add(new Resource(record));
         }
     }
 
@@ -166,7 +212,7 @@ public class Warc2Html {
     }
 
     private void add(Resource resource) {
-        if (resource.status >= 400) return;
+        if (!shouldInclude(resource)) return;
 
         String path = PathUtils.pathFromUrl(resource.url, forcedExtensions.get(resource.type));
 
@@ -211,6 +257,14 @@ public class Warc2Html {
             FileChannel channel = FileChannel.open(Paths.get(pathOrUrl));
             channel.position(offset);
             return new WarcReader(channel);
+        }
+    }
+
+    public void dump() {
+        for (Resource resource : resourcesByPath.values()) {
+            System.out.println(resource.path + " " + resource.url + " " + resource.instant + " " + resource.type + " " +
+                               resource.status + " " +
+                               (resource.locationHeader == null ? "-" : resource.locationHeader) + " " + resource.warc);
         }
     }
 

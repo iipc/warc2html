@@ -1,9 +1,12 @@
 /*
- * Copyright 2021 National Library of Australia
+ * Copyright 2021-2025 National Library of Australia
  * SPDX-License-Identifier: Apache-2.0
  */
 
 package org.netpreserve.warc2html;
+
+import org.netpreserve.jwarc.cdx.CdxFields;
+import org.netpreserve.jwarc.cdx.CdxRecord;
 
 import java.time.Instant;
 
@@ -27,6 +30,11 @@ class Resource {
         this.offset = offset;
         this.length = length;
         this.locationHeader = locationHeader;
+    }
+
+    public Resource(CdxRecord record) {
+        this(record.target(), record.date(), record.status(), record.get(CdxFields.MIME_TYPE),
+                record.filename(), record.position(), record.size(), record.redirect());
     }
 
     public boolean isRedirect() {
